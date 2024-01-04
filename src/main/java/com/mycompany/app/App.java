@@ -22,7 +22,10 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 
 
 public class App {
@@ -34,7 +37,7 @@ public class App {
     };
 
     public static void main(String[] args) throws IOException {
-        int port = 9000;
+        int port = 80;
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/coordinate", new CoordinationHandler());
         server.setExecutor(null);
@@ -71,51 +74,48 @@ public class App {
                 return new int[0]; // Retorna un arreglo vacío en caso de error
             }
         }
-                    private String sendRequestsToServers(String query) {
-                HttpClient client = HttpClient.newBuilder()
-                        .version(Version.HTTP_2)
-                        .connectTimeout(Duration.ofSeconds(20))
+        private String sendRequestsToServers(String query) {
+            HttpClient client = HttpClient.newBuilder()
+                    .version(Version.HTTP_2)
+                    .connectTimeout(Duration.ofSeconds(20))
+                    .build();
+        
+            String[] queryWords = query.split("\\s+");
+            AtomicIntegerArray totalPresenceCount = new AtomicIntegerArray(new int[queryWords.length]);
+            Map<String, List<Double>> filescores = new HashMap<>();
+        
+            CompletableFuture<Void>[] futures = new CompletableFuture[3];
+            for (int i = 0; i < 3; i++) {
+                String requestBody = query + "\n" + (i + 1);
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(SERVER_URIS[i]))
+                        .header("Content-Type", "text/plain")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                         .build();
-
-                // Dividir la consulta en palabras y determinar el número de palabras
-                String[] queryWords = query.split("\\s+");
-                int numberOfWords = queryWords.length;
-
-                // Inicializar el arreglo para contar la presencia total
-                int[] totalPresenceCount = new int[numberOfWords];
-                StringBuilder responses = new StringBuilder();
-                Map<String, List<Double>> filescores = new HashMap<>();
-                for (int i = 0; i < 3; i++) {
-                    String requestBody = query + "\n" + (i + 1);
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(URI.create(SERVER_URIS[i]))
-                            .header("Content-Type", "text/plain")
-                            .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                            .build();
-
-                    try {
-                        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-                        String serverResponse = response.body();
-                        //responses.append("Server ").append(i + 1).append(" Response: ").append(serverResponse).append("\n");
-                        Map<String, List<Double>> currentResponseScores = processServerResponse(serverResponse);
-                        filescores.putAll(currentResponseScores);
-                        // Extraer y sumar el número de presencias
-                        int[] presenceCount = extractPresenceCount(serverResponse);
-                        totalPresenceCount = sumPresenceCounts(totalPresenceCount, presenceCount);
-                    } catch (Exception e) {
-                        responses.append("Error contacting server ").append(i + 1).append("\n");
-                    }
-                }
-                System.out.println(filescores);
-                double[] normalizedPresenceCount = normalizePresenceCount(totalPresenceCount);
-
-                System.out.println(Arrays.toString(normalizedPresenceCount));
-                System.out.println(calculateFinalScores(filescores, normalizedPresenceCount));
-                Map<String, Double> finalScores = calculateFinalScores(filescores, normalizedPresenceCount);
-                String top10Results = getTop10Files(finalScores);
-                responses.append("Total Presence Count: ").append(Arrays.toString(normalizedPresenceCount)).append("\n");
-                return top10Results;
+        
+                futures[i] = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                                   .thenAccept(response -> {
+                                       String serverResponse = response.body();
+                                       filescores.putAll(processServerResponse(serverResponse));
+                                       int[] presenceCount = extractPresenceCount(serverResponse);
+                                       for (int j = 0; j < presenceCount.length; j++) {
+                                           totalPresenceCount.addAndGet(j, presenceCount[j]);
+                                       }
+                                   });
             }
+        
+            CompletableFuture.allOf(futures).join();
+        
+            int[] totalPresenceCountArray = new int[queryWords.length];
+            for (int i = 0; i < totalPresenceCountArray.length; i++) {
+                totalPresenceCountArray[i] = totalPresenceCount.get(i);
+            }
+        
+            double[] normalizedPresenceCount = normalizePresenceCount(totalPresenceCountArray);
+            Map<String, Double> finalScores = calculateFinalScores(filescores, normalizedPresenceCount);
+            return getTop10Files(finalScores);
+        }
+        
             private String getTop10Files(Map<String, Double> finalScores) {
                     return finalScores.entrySet().stream()
                       .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
