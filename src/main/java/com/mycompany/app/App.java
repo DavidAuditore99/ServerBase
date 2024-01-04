@@ -1,3 +1,5 @@
+//Meza Benitez David Emanuel 4CM12
+
 package com.mycompany.app;
 import com.sun.net.httpserver.HttpServer;
 
@@ -10,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpClient.Version;
 import java.io.*;
+import java.lang.management.ManagementFactory;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -26,14 +29,15 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicIntegerArray;
-
+import java.lang.management.ManagementFactory;
+import com.sun.management.OperatingSystemMXBean;
 
 public class App {
 
     private static final String[] SERVER_URIS = {
-        "http://35.238.64.216:80/search",
-        "http://35.184.181.99:80/search",
-        "http://35.184.160.187:80/search"
+        "http://35.238.64.216:80",
+        "http://35.184.181.99:80",
+        "http://35.184.160.187:80"
     };
 
     public static void main(String[] args) throws IOException {
@@ -41,13 +45,74 @@ public class App {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/coordinate", new CoordinationHandler());
         server.setExecutor(null);
+        server.createContext("/monitor", new MonitorHandler());
         server.start();
         System.out.println("Coordinator Server started on port " + port);
+    }
+    static class MonitorHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+        
+            HttpClient client = HttpClient.newHttpClient();
+            CompletableFuture<String>[] futures = new CompletableFuture[3];
+            for (int i = 0; i < 3; i++) {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(SERVER_URIS[i] + "/monitor"))
+                        .GET()
+                        .build();
+                futures[i] = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                                   .thenApply(HttpResponse::body);
+            }
+    
+            CompletableFuture.allOf(futures).join();
+            OperatingSystemMXBean osBean = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
+    
+            // Obtener el uso de CPU y memoria
+            double cpuLoadPre =osBean.getCpuLoad() * 100;
+            System.out.println( cpuLoadPre+ "%"); // still always 0%
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            double cpuLoad = osBean.getCpuLoad() * 100;
+            long totalMemory = osBean.getTotalMemorySize();
+            long freeMemory = osBean.getFreeMemorySize();
+            long usedMemory = totalMemory - freeMemory;
+            double memoryUsage = (double) usedMemory * 100 / totalMemory;
+            double cpuToSend = cpuLoad > cpuLoadPre? cpuLoad : cpuLoadPre;
+            // Crear la respuesta
+            String response = "{"+ "\n" +
+                                "\"CPU\": " + cpuToSend + "\n" +
+                              "\"Memoria\": " + memoryUsage + "\n" +
+                              " }";
+            StringBuilder jsonResponse = new StringBuilder("{\n");
+            for (int i = 0; i < futures.length; i++) {
+                jsonResponse.append("\"Servidor").append(i + 1).append("\": ")
+                .append(futures[i].join()).append(",\n");
+            }
+            jsonResponse.append("\"ServidorWeb\": ");
+            jsonResponse.append(response).append("\n}");;
+            response = jsonResponse.toString();
+            exchange.sendResponseHeaders(200, response.length());
+            OutputStream os = exchange.getResponseBody();
+            os.write(response.getBytes());
+            os.close();
+        }
     }
 
     static class CoordinationHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
+
+
+            t.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            t.getResponseHeaders().set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+            t.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+        
             if ("POST".equals(t.getRequestMethod())) {
                 InputStream is = t.getRequestBody();
                 String query = new String(is.readAllBytes(), StandardCharsets.UTF_8);
@@ -88,7 +153,7 @@ public class App {
             for (int i = 0; i < 3; i++) {
                 String requestBody = query + "\n" + (i + 1);
                 HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(SERVER_URIS[i]))
+                        .uri(URI.create(SERVER_URIS[i]+"/search"))
                         .header("Content-Type", "text/plain")
                         .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                         .build();
